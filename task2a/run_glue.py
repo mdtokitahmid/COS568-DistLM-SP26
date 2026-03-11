@@ -22,6 +22,8 @@ import glob
 import logging
 import os
 import random
+import time
+
 
 import numpy as np
 import torch
@@ -115,13 +117,17 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Total optimization steps = %d", t_total)
 
     global_step = 0
+    iter_times = []
+
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+
         for step, batch in enumerate(epoch_iterator):
+            start = time.time()
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {'input_ids':      batch[0],
@@ -172,8 +178,8 @@ def train(args, train_dataset, model, tokenizer):
 
             tr_loss += loss.item()
 
-            if step < 5:
-                print(f"Step {step}: loss = {loss.item()}")
+            # if step < 5:
+            print(f"Step {step}: loss = {loss.item()}")
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 ##################################################
                 # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
@@ -187,6 +193,14 @@ def train(args, train_dataset, model, tokenizer):
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
+            end = time.time()
+            if step > 0:  # skip first iteration
+                iter_times.append(end - start)
+
+        if args.local_rank==0:
+            print(f"Avg time per iter: {sum(iter_times)/len(iter_times):.3f}s")
+
+
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
