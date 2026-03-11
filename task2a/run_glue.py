@@ -25,8 +25,10 @@ import random
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
+                              
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
 
@@ -71,7 +73,14 @@ def train(args, train_dataset, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_device_train_batch_size
-    train_sampler = RandomSampler(train_dataset)
+    # train_sampler = RandomSampler(train_dataset)
+
+    if args.world_size > 1:
+        train_sampler = DistributedSampler(train_dataset)
+
+    else:
+        train_sampler = RandomSampler(train_dataset)       
+
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
@@ -132,14 +141,43 @@ def train(args, train_dataset, model, tokenizer):
             else:
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
+                loss.backward()
+
+                if args.world_size > 1:
+                    for parameter in model.parameters():
+                       if parameter.grad is not None:
+                            # for gathering node (node 0)
+
+                            if args.local_rank ==0 :
+                                # gather_list= []
+                                gather_list = [torch.zeros_like(tensor) for i in range(args.world_size)]
+                                dist.gather(parameter.grad, gather_list, dst= 0)
+                                mean_grad = torch.mean(torch.stack(gather_list), dim=0)
+                                parameter.grad= mean_grad
+
+                                # now scattter
+                                scatter_list = [parameter.grad]* args.world_size
+
+
+                            # for all other nodes
+                            else:
+                                 dist.gather(parameter.grad, dst=0)
+                                 scatter_list = None
+                            
+                            dist.scatter(parameter.grad, scatter_list=scatter_list, src=0)
+
                 
                 ##################################################
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
+
+            if step < 5:
+                print(f"Step {step}: loss = {loss.item()}")
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 ##################################################
                 # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
+                optimizer.step()
                 
                 ##################################################
                 scheduler.step() # Update learning rate schedule
@@ -155,6 +193,7 @@ def train(args, train_dataset, model, tokenizer):
         
         ##################################################
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
+        evaluate(args, model, tokenizer)
 
         ##################################################
 
@@ -348,7 +387,20 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
+
+    parser.add_argument("--master_ip", type=str)
+    parser.add_argument("--master_port", type=str)
+    parser.add_argument("--world_size", type=int, default=1)
     args = parser.parse_args()
+
+
+    if args.world_size > 1:
+        dist.init_process_group(
+            backend='gloo',
+            init_method=f"tcp://{args.master_ip}:{args.master_port}",
+            world_size=args.world_size,
+            rank=args.local_rank
+        )
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
@@ -388,6 +440,7 @@ def main():
     ##################################################
     # TODO(cos568): load the model using from_pretrained. Remember to pass in `config` as an argument.
     # If you pass in args.model_name_or_path (e.g. "bert-base-cased"), the model weights file will be downloaded from HuggingFace. (expect one line of code)
+    model = model_class.from_pretrained(args.model_name_or_path, config=config)
 
     ##################################################
 
