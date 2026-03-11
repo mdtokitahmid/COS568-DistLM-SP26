@@ -22,13 +22,18 @@ import glob
 import logging
 import os
 import random
+import time
+
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
+                              
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm, trange
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # import a previous version of the HuggingFace Transformers package
 from pytorch_transformers import (WEIGHTS_NAME, BertConfig,
@@ -71,7 +76,14 @@ def train(args, train_dataset, model, tokenizer):
     """ Train the model """
 
     args.train_batch_size = args.per_device_train_batch_size
-    train_sampler = RandomSampler(train_dataset)
+    # train_sampler = RandomSampler(train_dataset)
+
+    if args.world_size > 1:
+        train_sampler = DistributedSampler(train_dataset)
+
+    else:
+        train_sampler = RandomSampler(train_dataset)       
+
     train_dataloader = DataLoader(train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
@@ -106,13 +118,17 @@ def train(args, train_dataset, model, tokenizer):
     logger.info("  Total optimization steps = %d", t_total)
 
     global_step = 0
+    iter_times = []
+
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
     for _ in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
+
         for step, batch in enumerate(epoch_iterator):
+            start = time.time()
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {'input_ids':      batch[0],
@@ -133,14 +149,44 @@ def train(args, train_dataset, model, tokenizer):
                 ##################################################
                 # TODO(cos568): perform backward pass here (expect one line of code)
                 loss.backward()
+
+                # if args.world_size > 1:
+
+                    
+                    # for parameter in model.parameters():
+                    #    if parameter.grad is not None:
+                            # for gathering node (node 0)
+
+                            # if args.local_rank ==0 :
+                            #     # gather_list= []
+                            #     gather_list = [torch.zeros_like(parameter.grad) for i in range(args.world_size)]
+                            #     dist.gather(parameter.grad, gather_list, dst= 0)
+                            #     mean_grad = torch.mean(torch.stack(gather_list), dim=0)
+                            #     parameter.grad= mean_grad
+
+                            #     # now scattter
+                            #     scatter_list = [parameter.grad]* args.world_size
+
+
+                            # # for all other nodes
+                            # else:
+                            #      dist.gather(parameter.grad, dst=0)
+                            #      scatter_list = None
+                            
+                            # dist.scatter(parameter.grad, scatter_list=scatter_list, src=0)
+                            # dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+                            # parameter.grad /= args.world_size
+
+
                 
                 ##################################################
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
 
             tr_loss += loss.item()
 
-            if step < 5:
-                print(f"Step {step}: loss = {loss.item()}")
+            # if step < 5:
+            print(f"[Rank {args.local_rank}] Step {step}: loss = {loss.item()}")
+
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 ##################################################
                 # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
@@ -154,13 +200,22 @@ def train(args, train_dataset, model, tokenizer):
             if args.max_steps > 0 and global_step > args.max_steps:
                 epoch_iterator.close()
                 break
+            end = time.time()
+            if step > 0:  # skip first iteration
+                iter_times.append(end - start)
+
+        if args.local_rank==0:
+            print(f"Avg time per iter: {sum(iter_times)/len(iter_times):.3f}s")
+
+
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
         
         ##################################################
         # TODO(cos568): call evaluate() here to get the model performance after every epoch. (expect one line of code)
-        evaluate(args, model, tokenizer)
+        if args.local_rank ==0:
+            evaluate(args, model, tokenizer)
 
         ##################################################
 
@@ -354,7 +409,20 @@ def main():
                              "See details at https://nvidia.github.io/apex/amp.html")
     parser.add_argument("--local_rank", type=int, default=-1,
                         help="For distributed training: local_rank. If single-node training, local_rank defaults to -1.")
+
+    parser.add_argument("--master_ip", type=str)
+    parser.add_argument("--master_port", type=str)
+    parser.add_argument("--world_size", type=int, default=1)
     args = parser.parse_args()
+
+
+    if args.world_size > 1:
+        dist.init_process_group(
+            backend='gloo',
+            init_method=f"tcp://{args.master_ip}:{args.master_port}",
+            world_size=args.world_size,
+            rank=args.local_rank
+        )
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
@@ -402,6 +470,9 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)
+    if args.world_size > 1:
+        # from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model)
 
     logger.info("Training/evaluation parameters %s", args)
 
@@ -412,8 +483,13 @@ def main():
         global_step, tr_loss = train(args, train_dataset, model, tokenizer)
         logger.info(" global_step = %s, average loss = %s", global_step, tr_loss)
 
-    # Evaluation
-    evaluate(args, model, tokenizer, prefix="")
+    if args.world_size > 1:
+        dist.barrier()
+    if args.local_rank == 0:
+        evaluate(args, model, tokenizer, prefix="")
 
 if __name__ == "__main__":
     main()
+
+
+# python3 task2a/run_glue.py --model_type bert --model_name_or_path bert-base-cased   --task_name $TASK_NAME --do_train --do_eval   --data_dir $GLUE_DIR/$TASK_NAME --max_seq_length 128   --per_device_train_batch_size 16 --learning_rate 2e-5   --num_train_epochs 1 --output_dir /tmp/$TASK_NAME/   --overwrite_output_dir   --master_ip 10.10.1.2 --master_port 12345 --world_size 4 --local_rank 0
