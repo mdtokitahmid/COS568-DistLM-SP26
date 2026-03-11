@@ -150,7 +150,7 @@ def train(args, train_dataset, model, tokenizer):
 
                             if args.local_rank ==0 :
                                 # gather_list= []
-                                gather_list = [torch.zeros_like(tensor) for i in range(args.world_size)]
+                                gather_list = [torch.zeros_like(parameter.grad) for i in range(args.world_size)]
                                 dist.gather(parameter.grad, gather_list, dst= 0)
                                 mean_grad = torch.mean(torch.stack(gather_list), dim=0)
                                 parameter.grad= mean_grad
