@@ -132,7 +132,7 @@ def train(args, train_dataset, model, tokenizer):
             active=3,  # profile 3 steps
             repeat=1
         ),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/task2a_rank{args.local_rank}'),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/task3_rank{args.local_rank}'),
         record_shapes=True,
         # with_stack=True
     )
