@@ -124,16 +124,16 @@ def train(args, train_dataset, model, tokenizer):
     train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
 
-        profiler = torch.profiler.profile(
-        schedule=torch.profiler.schedule(
-            wait=1,    # skip first step
-            warmup=0,  # warmup 0 step  
-            active=3,  # profile 3 steps
-            repeat=1
-        ),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/task2a_rank{args.local_rank}'),
-        record_shapes=True,
-        with_stack=True
+    profiler = torch.profiler.profile(
+    schedule=torch.profiler.schedule(
+        wait=1,    # skip first step
+        warmup=0,  # warmup 0 step  
+        active=3,  # profile 3 steps
+        repeat=1
+    ),
+    on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/task2a_rank{args.local_rank}'),
+    record_shapes=True,
+    with_stack=True
     )
     profiler.start()
     for _ in train_iterator:
