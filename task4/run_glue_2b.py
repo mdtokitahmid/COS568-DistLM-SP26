@@ -130,8 +130,8 @@ def train(args, train_dataset, model, tokenizer):
             active=3,  # profile 3 steps
             repeat=1
         ),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/task2b_rank{args.local_rank}'),
-        record_shapes=True,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./profiler_output/task2b_rank{args.local_rank}')
+        # record_shapes=True,
         # with_stack=True
     )
     profiler.start()
@@ -166,23 +166,25 @@ def train(args, train_dataset, model, tokenizer):
                        if parameter.grad is not None:
                             # for gathering node (node 0)
 
-                            if args.local_rank ==0 :
-                                # gather_list= []
-                                gather_list = [torch.zeros_like(parameter.grad) for i in range(args.world_size)]
-                                dist.gather(parameter.grad, gather_list, dst= 0)
-                                mean_grad = torch.mean(torch.stack(gather_list), dim=0)
-                                parameter.grad= mean_grad
+                            # if args.local_rank ==0 :
+                            #     # gather_list= []
+                            #     gather_list = [torch.zeros_like(parameter.grad) for i in range(args.world_size)]
+                            #     dist.gather(parameter.grad, gather_list, dst= 0)
+                            #     mean_grad = torch.mean(torch.stack(gather_list), dim=0)
+                            #     parameter.grad= mean_grad
 
-                                # now scattter
-                                scatter_list = [parameter.grad]* args.world_size
+                            #     # now scattter
+                            #     scatter_list = [parameter.grad]* args.world_size
 
 
-                            # for all other nodes
-                            else:
-                                 dist.gather(parameter.grad, dst=0)
-                                 scatter_list = None
+                            # # for all other nodes
+                            # else:
+                            #      dist.gather(parameter.grad, dst=0)
+                            #      scatter_list = None
                             
-                            dist.scatter(parameter.grad, scatter_list=scatter_list, src=0)
+                            # dist.scatter(parameter.grad, scatter_list=scatter_list, src=0)
+                            dist.all_reduce(parameter.grad, op=dist.ReduceOp.SUM)
+                            parameter.grad /= args.world_size
 
                 
                 ##################################################
